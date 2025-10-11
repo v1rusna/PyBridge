@@ -1,3 +1,10 @@
+
+.gitignore
+promt.txt
+test.rpy
+.vscode
+test.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
