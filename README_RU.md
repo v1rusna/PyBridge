@@ -152,6 +152,9 @@ pybridge.python_async(
 pybridge.add_python("my_version", "path/to/python", "path/to/server.py")
 ```
 
+**Исключения:**
+- `PyBridgeFileException`: python по указанному пути не найдет либо превышает 60MB
+
 #### `PyBridge.python(version="3.13.7", code="", seconds=5, args=None, variables=None, cwd=None, input_data=None, use_pool=True)`
 
 Выполняет Python-код синхронно.
@@ -242,9 +245,9 @@ pybridge.python_async(code="2 * 3", callback=my_callback)
 
 Система логирования с ротацией файлов.
 
-#### `LogSystem.log(message)`
+#### `LogSystem.log(message, no_lock=False)`
 
-Записывает сообщение в лог.
+Записывает сообщение в лог, в классе используется `threading.Lock()`, `no_lock=True` отключает его.
 ## Вспомогательные и приватные элементы
 
 Следующие элементы считаются внутренними и не рекомендуются к использованию напрямую, если вы не понимаете последствий:

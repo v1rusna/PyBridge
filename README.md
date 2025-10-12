@@ -155,6 +155,9 @@ Adds a Python version for use.
 pybridge.add_python("my_version", "path/to/python", "path/to/server.py")
 ```
 
+**Exceptions:**
+- `PyBridgeFileException`: python cannot find the specified path or it exceeds 60MB.
+
 #### `PyBridge.python(version="3.13.7", code="", seconds=5, args=None, variables=None, cwd=None, input_data=None, use_pool=True)`
 
 Executes Python code synchronously.
@@ -247,7 +250,7 @@ Logging system with file rotation.
 
 #### `LogSystem.log(message)`
 
-Writes message to log.
+Writes a message to the log; the class uses `threading.Lock()`, `no_lock=True` disables it.
 
 ## Auxiliary and Private Elements
 

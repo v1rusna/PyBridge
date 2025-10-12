@@ -1,3 +1,26 @@
+"""
+# Для совместимости с обычным python:
+if sys.version_info[0] >= 3:
+    import types
+    import os
+    # Создаём минимальные заглушки, которые ожидает модуль
+    renpy = types.SimpleNamespace(
+        log=print,
+        invoke_in_main_thread=lambda cb, *a, **k: cb(*a, **k),  # просто вызываем колбэк сразу
+        loader=types.SimpleNamespace(transfn=lambda p: p)
+    )
+    config = types.SimpleNamespace(quit_callbacks=[])
+else:
+    class _NS(object):
+        def __init__(self, **kw):
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    renpy = _NS(log=print, invoke_in_main_thread=lambda cb, *a, **k: cb(*a, **k),
+            loader=_NS(transfn=lambda p: p))
+    config = _NS(quit_callbacks=[])
+"""
+
 init -9999 python:
     import os
     import subprocess
@@ -46,7 +69,11 @@ init -9999 python:
             self.file = None
             self.enabled = True
             self._lock = threading.Lock()
+            #self.__size_cache = 0
             self.open()
+
+        def __del__(self):
+            self.close()
 
         def open(self):
             if self.file is None and self.enabled:
@@ -56,7 +83,10 @@ init -9999 python:
                     self.file = codecs.open(self.filename, "a", encoding="utf-8")
                     self.log("Log started")
                 except Exception as e:
-                    renpy.log("LogSystem: Failed to open log file: %s" % e)
+                    try:
+                        renpy.log("LogSystem: Failed to open log file: %s" % e)
+                    except:
+                        pass
                     self.file = None
 
         def close(self):
@@ -65,32 +95,40 @@ init -9999 python:
                     self.log("Log closed")
                     self.file.close()
                 except Exception as e:
-                    renpy.log("LogSystem: Failed to close log file: %s" % e)
-                    pass
+                    try:
+                        renpy.log("LogSystem: Failed to close log file: %s" % e)
+                    except:
+                        pass
                 self.file = None
 
-        def log(self, message):
-            with self._lock:
-                if not self.enabled:
-                    return
-                if self.file is None:
+        def log(self, message, no_lock=False):
+            if no_lock:
+                self.__log(message)
+            else:
+                with self._lock:
+                    self.__log(message)
+
+        def __log(self, message):
+            if not self.enabled:
+                return
+            if self.file is None:
+                self.open()
+
+            try:
+                if os.path.exists(self.filename) and os.path.getsize(self.filename) > 5 * 1024 * 1024:
+                    self.file.close()
+                    os.rename(self.filename, self.filename + ".old")
                     self.open()
 
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                self.file.write("[%s] %s\n" % (timestamp, message))
+                self.file.flush()
+            except Exception as e:
                 try:
-                    if os.path.getsize(self.filename) > 5 * 1024 * 1024:
-                        self.file.close()
-                        os.rename(self.filename, self.filename + ".old")
-                        self.open()
-
-                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                    self.file.write("[%s] %s\n" % (timestamp, message))
-                    self.file.flush()
-                except Exception as e:
                     renpy.log("LogSystem: Failed to write to log file: %s" % e)
                     renpy.log("Original message for file '%s': %s" % (self.filename, message))
-
-        def __del__(self):
-            self.close()
+                except:
+                    pass
 
     class PyBridge(object):
         create_bridge = False
@@ -165,7 +203,6 @@ init -9999 python:
             except Exception:
                 # Игнорируем любые ошибки при очистке
                 pass
-
 
         def __del__(self):
             PyBridge.create_bridge = False
@@ -253,7 +290,7 @@ init -9999 python:
                 with self._lock:
                     for key, info in list(self._cache.items()):
                         if time.time() - info["time"] > self.MAX_AGE:
-                            self._log("Clearing cached file: " + info["path"])
+                            self._log("Clearing cached file: " + info["path"], no_lock=True)
                             try:
                                 os.remove(info["path"])
                             except OSError:
@@ -261,9 +298,11 @@ init -9999 python:
                             del self._cache[key]
 
                     for key, info in list(self.__cache_info.items()):
-                        self._log("Checking cached info for key: " + key)
+                        self._log("Checking cached info for key: " + key, no_lock=True)
                         if time.time() - info["time"] > self.MAX_AGE:
                             del self.__cache_info[key]
+
+                        
             except Exception as e:
                 raise PyBridgeCacheException("Failed to clear cache: %s" % e)
             
@@ -295,8 +334,12 @@ init -9999 python:
                 raise PyBridgeException("Python version '%s' not found" % version)
 
             original_path = self.get_path(self.__pythons[version])
+
             if not os.path.exists(original_path):
                 raise PyBridgeFileException("Python executable not found: %s" % original_path)
+
+            if os.path.getsize(original_path) > 60 * 1024 * 1024:
+                raise PyBridgeException("Python version “%s” weighs more than 60 MB." % version)
 
             self.__create_temp_dir()
 
@@ -383,7 +426,7 @@ init -9999 python:
                     # Удаляем битый сервер, если был создан
                     for srv in list(self.__all_servers):
                         if getattr(srv, "PORT", None) == port:
-                            self.__all_servers.remove(srv)
+                            srv.close()
                             break
                 raise PyBridgeServerException("Failed to create server: %s" % e)
 
@@ -404,9 +447,12 @@ init -9999 python:
                 return
             if not server.is_alive():
                 pylog.log("Server on port %d already closed." % server.PORT)
+            else:
+                server.close()
 
             with self._lock:
-                self.__all_servers.pop(self.__all_servers.index(server))
+                if server in self.__all_servers:
+                    self.__all_servers.pop(self.__all_servers.index(server))
                 self.__busy_ports.discard(server.PORT)
                 self.__busy_server_ids.discard(server.get_id())
 
@@ -417,15 +463,26 @@ init -9999 python:
         def add_python(self, version, path, server_file="default"):
             if path == "default":
                 path = self.__python313_default_path
-            self.__pythons[version] = path
-            # Сбрасываем временную копию при изменении
-            if version in self.__temp_pythons:
-                del self.__temp_pythons[version]
 
-            if server_file == "default":
-                server_file = self.__server_default_path
-            self.__server_python[version] = server_file
-        
+            original_path = self.get_path(path)
+            if not os.path.exists(original_path):
+                raise PyBridgeFileException("Python executable not found: %s" % original_path)
+
+            try:
+                if os.path.getsize(original_path) > 60 * 1024 * 1024:
+                    raise PyBridgeException("Python version “%s” weighs more than 60 MB." % version)
+            except OSError:
+                # если нельзя получить размер (на некоторых FS) — просто пропускаем или логируем
+                self._log("Warning: could not determine size of %s" % original_path, no_lock=True)
+
+            with self._lock:
+                self.__pythons[version] = path
+                if version in self.__temp_pythons:
+                    del self.__temp_pythons[version]
+                if server_file == "default":
+                    server_file = self.__server_default_path
+                self.__server_python[version] = server_file
+
         def remove_python(self, version):
             with self._lock:
                 if version in self.__pythons:
@@ -436,7 +493,10 @@ init -9999 python:
                     del self.__server_python[version]
                 for server in list(self.__all_servers):
                     if version == server.version():
-                        self.__all_servers.remove(self.__all_servers.index(server))
+                        try:
+                            server.close()
+                        except Exception:
+                            pass
         
         def list_versions(self):
             return list(self.__pythons.keys())
@@ -473,7 +533,7 @@ init -9999 python:
             return hashlib.sha256(code).hexdigest()
 
         def __get_file_hash(self, file_path):
-            with codecs.open(file_path, "rb") as f:
+            with open(file_path, "rb") as f:
                 return self.__get_hash(f.read())
 
         def cleanup(self):
@@ -504,7 +564,7 @@ init -9999 python:
                     except Exception as e:
                         pylog.log("Failed to cleanup temp directory: " + str(e))
         
-        def python(self, version="3.13.7", code="", seconds=5, args=None, variables=None, cwd=None, input_data=None, use_pool=True, safe_mode=None, error=True):
+        def python(self, version="3.13.7", code="", seconds=5, args=None, variables=None, cwd=None, input_data=None, use_pool=True, error=True):
             """Выполняет код на указанной версии Python, возвращает stdout"""
             if not code:
                 return ""
@@ -514,8 +574,8 @@ init -9999 python:
                 variables = {}
             if args is None:
                 args = []
-            if safe_mode is None:
-                safe_mode = self.safe_mode
+            #if safe_mode is None:
+            #    safe_mode = self.safe_mode
 
             def execute():
                 flags = ["-c", wrapper] + args
@@ -527,7 +587,7 @@ init -9999 python:
                 python_path = self._get_temp_python(version)
 
                 # Создаем обертку, которая декодирует и выполняет код
-                wrapper = self.__wrapper(code, variables, safe_mode, server_mode=use_pool)
+                wrapper = self.__wrapper(code, variables, server_mode=use_pool) #safe_mode
 
                 if self.debug:
                     with codecs.open("debug.py", "w", encoding="utf-8") as f:
@@ -539,7 +599,7 @@ init -9999 python:
                         if not server.is_alive(check_connection=True):
                             #self.init_pool()
                             self._log("The server on port %s from the pool failed the connection check; the standard method is used." % server.PORT)
-                            self.__wrapper(code, variables, safe_mode)
+                            self.__wrapper(code, variables) #safe_mode
                             out, err = execute()
                             #flags = ["-c", wrapper] + args
                             #out, err = self._exec(python_path, seconds, flags, cwd=cwd, input_data=input_data)
@@ -579,7 +639,7 @@ init -9999 python:
                     raise PyBridgeExecException("Python process timeout after %d seconds" % seconds)
                 time.sleep(0.05)
 
-            stdout, stderr = proc.communicate(input=input_data)
+            stdout, stderr = proc.communicate(input=input_data) # timeout - нет в python 2.7 и поэтому он воссоздан вручную
 
             out, err = self._decoder(stdout, stderr)
 
@@ -625,11 +685,17 @@ init -9999 python:
 
             return out, err
 
-        def __wrapper(self, code, variables, safe_mode, server_mode=False):
+        def __wrapper(self, code, variables, server_mode=False): #variables, safe_mode, server_mode
             import json, base64
             if not server_mode:
                 code_bytes = code.encode('utf-8')
-                code_base64 = base64.b64encode(code_bytes).decode('ascii')
+                b64 = base64.b64encode(code_bytes)
+
+                if isinstance(b64, bytes):
+                    code_base64 = b64.decode('ascii')
+                else:
+                    code_base64 = b64
+
 
             # подготовим сериализованные переменные
             try:
@@ -640,14 +706,11 @@ init -9999 python:
 
             lines = []
             lines.append("import base64, json, sys, traceback")
-            # вставляем код создания safe_builtins (если нужен)
-            if safe_mode:
-                lines.append(self.__make_safe_builtins_code())
-                lines.append("globals_dict = {'__builtins__': safe_builtins}")
-            else:
-                # осторожно: globals() дает доступ ко всему; смотрите предупреждение
-                lines.append("globals_dict = globals().copy()")
-            # загрузим переменные из JSON в локальную dict после валидации имён
+            #if safe_mode:
+            #    lines.append(self.__make_safe_builtins_code())
+            #    lines.append("globals_dict = {'__builtins__': safe_builtins}")
+            #else:
+            lines.append("globals_dict = globals().copy()")
             lines.append("vars_data = json.loads(%r)" % vars_json)
             lines.append("for k,v in list(vars_data.items()):")
             lines.append("    if not isinstance(k, str) or not k.isidentifier():")
@@ -683,43 +746,43 @@ init -9999 python:
             wrapper = "\n".join(lines)
             return wrapper
 
-        def __make_safe_builtins_code(self):
-            """
-            Возвращает строку Python-кода, который создаёт словарь safe_builtins
-            и помещает его в переменную safe_builtins (внутри wrapper).
-            Это корректно вставляется в текст wrapper'а.
-            """
-            # Явно задаём белый список имён, которые возьмём из builtins
-            safe_names = [
-                'None','True','False',
-                'int','float','complex','bool','str','bytes','bytearray',
-                'list','tuple','set','frozenset','dict',
-                'range','slice',
-                'abs','all','any','ascii','bin','chr','divmod','enumerate',
-                'filter','format','hash','hex','id','isinstance','issubclass',
-                'iter','len','map','max','min','next','oct','ord','pow','repr',
-                'reversed','round','sorted','sum','zip'
-            ]
-            # Вставим создание словаря безопасных builtins как код-строку
-            lines = []
-            lines.append("import builtins as __builtins_mod")
-            lines.append("safe_builtins = {}")
-            for name in safe_names:
-                # присваиваем только если есть в builtins
-                lines.append("if hasattr(__builtins_mod, '%s'):\n    safe_builtins['%s'] = getattr(__builtins_mod, '%s')" % (name, name, name))
-            # добавим модули, если хотим
-            lines.append("import math as __math_mod")
-            lines.append("safe_builtins['math'] = __math_mod")
-            lines.append("import itertools as __it_mod")
-            lines.append("safe_builtins['itertools'] = __it_mod")
-            # добавим безопасную функцию print (пишет в stderr, но можно сделать логер)
-            #lines.append("def __safe_print(*args, **kwargs):\n    try:\n        __builtins_mod.print(*args, **kwargs)\n    except Exception:\n        pass")
-            lines.append("safe_builtins['print'] = __safe_print")
-            # явное отключение опасных имён (на всякий случай)
-            banned = ['__import__','open','eval','exec','compile','input','globals','locals','vars','help']
-            for b in banned:
-                lines.append("safe_builtins.pop('%s', None)" % b)
-            return "\n".join(lines)
+        #def __make_safe_builtins_code(self):
+        #    """
+        #    Возвращает строку Python-кода, который создаёт словарь safe_builtins
+        #    и помещает его в переменную safe_builtins (внутри wrapper).
+        #    Это корректно вставляется в текст wrapper'а.
+        #    """
+        #    # Явно задаём белый список имён, которые возьмём из builtins
+        #    safe_names = [
+        #        'None','True','False',
+        #        'int','float','complex','bool','str','bytes','bytearray',
+        #        'list','tuple','set','frozenset','dict',
+        #        'range','slice',
+        #        'abs','all','any','ascii','bin','chr','divmod','enumerate',
+        #        'filter','format','hash','hex','id','isinstance','issubclass',
+        #        'iter','len','map','max','min','next','oct','ord','pow','repr',
+        #        'reversed','round','sorted','sum','zip'
+        #    ]
+        #    # Вставим создание словаря безопасных builtins как код-строку
+        #    lines = []
+        #    lines.append("import builtins as __builtins_mod")
+        #    lines.append("safe_builtins = {}")
+        #    for name in safe_names:
+        #        # присваиваем только если есть в builtins
+        #        lines.append("if hasattr(__builtins_mod, '%s'):\n    safe_builtins['%s'] = getattr(__builtins_mod, '%s')" % (name, name, name))
+        #    # добавим модули, если хотим
+        #    lines.append("import math as __math_mod")
+        #    lines.append("safe_builtins['math'] = __math_mod")
+        #    lines.append("import itertools as __it_mod")
+        #    lines.append("safe_builtins['itertools'] = __it_mod")
+        #    # добавим безопасную функцию print (пишет в stderr, но можно сделать логер)
+        #    #lines.append("def __safe_print(*args, **kwargs):\n    try:\n        __builtins_mod.print(*args, **kwargs)\n    except Exception:\n        pass")
+        #    lines.append("safe_builtins['print'] = __safe_print")
+        #    # явное отключение опасных имён (на всякий случай)
+        #    banned = ['__import__','open','eval','exec','compile','input','globals','locals','vars','help']
+        #    for b in banned:
+        #        lines.append("safe_builtins.pop('%s', None)" % b)
+        #    return "\n".join(lines)
 
         def init_python(self, version="3.13.7"):
             """Инициализирует и возвращает путь к Python интерпретатору указанной версии"""
@@ -810,9 +873,9 @@ init -9999 python:
 
             return out
 
-        def _log(self, message):
+        def _log(self, message, no_lock=False):
             if self.debug:
-                pylog.log("PyBridge: " + message)
+                pylog.log("PyBridge: " + message, no_lock=no_lock)
 
     class PyServer(object):
         """
@@ -875,6 +938,10 @@ init -9999 python:
                 self.__log_system.log("Send error on port %d: %s" % (self.PORT, e))
                 raise
             finally:
+                try:
+                    client.close()
+                except:
+                    pass
                 with self.__tasks_lock:
                     self.__tasks_count -= 1
 
@@ -910,23 +977,28 @@ init -9999 python:
             except (ConnectionRefusedError, socket.timeout):
                 return False
             finally:
-                s.close()
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
         def start_logging(self):
-            def reader():
+            def stdout_reader():
                 for line in iter(self.__proc.stdout.readline, b''):
                     if not self.__active:
                         break
-                    self.__log_system.log("Server[[%d]: %s" % (self.PORT, line.decode('utf-8').strip()))
-            t = threading.Thread(target=reader)
+                    self.__log_system.log("Server[%d]: %s" % (self.PORT, line.decode('utf-8', errors='replace').strip()))
+            t = threading.Thread(target=stdout_reader)
             t.daemon = True
             t.start()
-            def reader():
+
+            def stderr_reader():
                 for line in iter(self.__proc.stderr.readline, b''):
                     if not self.__active:
                         break
-                    self.__log_system.log("Server[[%d][['error']: %s" % (self.PORT, line.decode('utf-8').strip()))
-            t = threading.Thread(target=reader)
+                    self.__log_system.log("Server[%d][['error']: %s" % (self.PORT, line.decode('utf-8', errors='replace').strip()))
+
+            t = threading.Thread(target=stderr_reader)
             t.daemon = True
             t.start()
 
@@ -954,12 +1026,13 @@ init -9999 python:
         def close(self):
             """защита от рекурсии реализованно в поле __active"""
             if self.__active:
-                self.__active = False
                 try:
                     if self.is_alive():
                         self.send("EXIT")
                 except Exception:
                     pass
+                self.__active = False
+                self.__server_is_alive = False
                 self.__pybridge.close_server(self)
 
 

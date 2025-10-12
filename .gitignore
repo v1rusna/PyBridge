@@ -4,6 +4,7 @@ promt.txt
 test.rpy
 .vscode
 test.py
+*.rpyc
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
