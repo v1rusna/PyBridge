@@ -118,7 +118,9 @@ class ServerEmbed:
                 exec_locals = {}
 
                 exec(code, exec_globals, exec_locals)
-                result = exec_locals.get("result", "ok")
+                # result = exec_locals.get("result", "ok")
+                exec(code)
+                result = exec_locals.get("result") or exec_globals.get("result") or "ok"
                 user.send("RESULT:" + str(result))
             except Exception:
                 user.send("ERROR:\n" + traceback.format_exc())
