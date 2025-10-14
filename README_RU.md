@@ -408,6 +408,22 @@ def my_callback(result, error):
 pybridge.python_async(code="2 * 3", callback=my_callback)
 ```
 
+#### `PyBridge.exec_temp_file(src_path, version="3.13.7", seconds=10, cache=False, related_files=None, cwd=None)`
+
+Выполняет Python-скрипт из файла с поддержкой зависимых файлов и кастомной рабочей директории.
+
+**Параметры:**
+| Имя | Тип | По умолчанию | Описание |
+|-----|-----|-------------|----------|
+| src_path | str | - | Путь к основному исполняемому файлу |
+| version | str | "3.13.7" | Версия Python |
+| seconds | int | 10 | Таймаут выполнения |
+| cache | bool | False | Кэшировать временный файл |
+| related_files | list | None | Список зависимых файлов |
+| cwd | str | None | Рабочая директория выполнения |
+
+**Возвращает:** `str` - stdout выполнения
+
 #### `PyBridge.create_server(version="3.13.7", port=5000)`
 
 Создает серверный процесс.
@@ -463,6 +479,14 @@ if not server.is_busy():
 | buffer_size | int | 65536 | Размер буфера |
 
 **Возвращает:** str - результат выполнения
+
+#### `PyServer.safe_send(code, *a, **kw)`
+
+Безопасная отправка кода серверу которая не вызовет ошибку в случаи чего.
+
+#### `PyServer.send_file(self, path)`
+
+Считывания кода из py файла и отправка на выполнение серверу
 
 #### `PyServer.send_async(data, timeout=15, callback=None)`
 
@@ -538,6 +562,7 @@ if not server.is_busy():
 - `__create_temp_file(file, cache)`: Создает временную копию файла
 - `__popenen(python_path, flags, cwd)`: Запускает процесс Python
 - `__wait_for_server(port, timeout)`: Ожидает запуск сервера
+- `__create_temp_file(file, cache, no_rename)`: Создает временные копии файлов и исполняет их
 
 ### Внутренние методы PyServer (internal)
 
@@ -1011,7 +1036,6 @@ for i in range(100):
     result = pybridge.python(code="...", use_pool=False)  # Медленно!
 
 # ❌ НЕ ЭФФЕКТИВНО - нативная многопоточность для вычислений
-# (из-за GIL в Python)
 ```
 
 ### Выводы
@@ -1145,6 +1169,20 @@ init python:
         callback=on_calculation_done,
         progress_callback=show_loading_screen
     )
+```
+
+### 4. Модульные проекты
+```python
+dependencies = []
+for root, dirs, files in os.walk("my_project"):
+    for file in files:
+        if file.endswith(".py"):
+            dependencies.append(os.path.join(root, file))
+
+result = pybridge.exec_temp_file(
+    src_path="my_project/main.py",
+    related_files=dependencies
+)
 ```
 
 ## Частые ошибки и их исправление (Troubleshooting)

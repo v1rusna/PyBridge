@@ -1,5 +1,6 @@
-"""Имеет совместимость с обычным python, нужно импортировать файл PyBridge.py, код автоматически будет адаптирован мод python"""
+# -*- coding: utf-8 -*-
 init -9999 python:
+    import socket
     import os
     import subprocess
     import shutil
@@ -11,6 +12,7 @@ init -9999 python:
     import time
     import hashlib
     import random
+    from collections import deque
 
     class PyBridgeException(Exception):
         """Базовое исключение для всех ошибок PyBridge"""
@@ -942,7 +944,7 @@ init -9999 python:
             for k, v in info.items():
                 pylog.log(k + ": " + str(v))
 
-        def __create_temp_file(self, file, cache=False):
+        def __create_temp_file(self, file, cache=False, no_rename=False):
             file = self.get_path(file)
             if not os.path.exists(file):
                 raise PyBridgeException("Source file does not exist: %s" % file)
@@ -956,23 +958,34 @@ init -9999 python:
             if cache and temp_data:
                 temp_path = temp_data
             else:
-                temp_path = os.path.join(self.__temp_dir, os.path.basename(abs_file+".%s" % random.randint(0, 9999)))
+                if no_rename:
+                    temp_path = os.path.join(self.__temp_dir, os.path.basename(abs_file))
+                else:
+                    temp_path = os.path.join(self.__temp_dir, os.path.basename(abs_file+".%s" % random.randint(0, 9999)))
                 shutil.copy2(abs_file, temp_path)
                 if cache:
                     self.__set_cache(temp_path, self.__get_file_hash(abs_file))
 
             return temp_path
 
-        def exec_temp_file(self, src_path, version="3.13.7", seconds=10, cache=False):
+        def exec_temp_file(self, src_path, version="3.13.7", seconds=10, cache=False, related_files=None, cwd=None):
             """
             Копирует указанный файл во временную директорию PyBridge, выполняет его указанной версией Python.
             Если cache=True, временный файл сохраняется для повторного использования.
             Возвращает stdout.
             """
+            _temp_files = []
+            if related_files is None:
+                related_files = []
+
+            for file in related_files:
+                _temp_files.append(self.__create_temp_file(file, cache, True))
+
             temp_path = self.__create_temp_file(src_path, cache)
 
             python_path = self._get_temp_python(version)
-            cwd = os.path.dirname(temp_path)
+            if cwd is None:
+                cwd = os.path.dirname(temp_path)
 
             # Выполнение файла
             try:
@@ -984,6 +997,12 @@ init -9999 python:
             if not cache:
                 try:
                     os.remove(temp_path)
+                except Exception:
+                    pass
+
+            for t_file in _temp_files:
+                try:
+                    os.remove(t_file)
                 except Exception:
                     pass
 
@@ -1001,6 +1020,7 @@ init -9999 python:
         - код Python для выполнения
         - EXIT для завершения сервера
         - IMPORT:<module> для импорта модуля
+        - PING в ответ вернет PONG
         Возвращает:
         - RESULT:<output> при успешном выполнении кода (output это переменная result из выполненного кода, если переменной этой нет в вашем коде, возвращается "ok")
         """
@@ -1019,6 +1039,7 @@ init -9999 python:
             self.__lock = threading.Lock()
             self.__logging_tread = []
             self.__busy = False
+            self.__history = []
 
         def __del__(self):
             self.close()
@@ -1033,7 +1054,7 @@ init -9999 python:
         def version(self):
             return self.__version
 
-        def send(self, code, timeout=5, buffer_size=65536):
+        def send(self, code, timeout=5, buffer_size=65536, expect_result=True):
             import socket
             if not self.__active or not self.is_alive():
                 self.close()
@@ -1049,9 +1070,13 @@ init -9999 python:
                 if not isinstance(code, bytes):
                     code = code.encode('utf-8')
                 client.sendall(code)
-                data = client.recv(buffer_size)
-                return data.decode('utf-8', errors='replace')
+                if not expect_result:
+                    return
+                data = client.recv(buffer_size).decode('utf-8', errors='replace')
+                self.__history.append((time.time(), code, data))
+                return data
             except Exception as e:
+                self.__history.append((time.time(), code, "ERROR"))
                 self.__log_system.log("Send error on port %d: %s" % (self.PORT, e))
                 raise
             finally:
@@ -1061,6 +1086,19 @@ init -9999 python:
                     pass
                 with self.__lock:
                     self.__busy = False
+
+        def safe_send(self, code, *a, **kw):
+            try:
+                return self.send(code, *a, **kw)
+            except Exception as e:
+                self.__log_system.log("safe_send failed: %s" % e)
+                return "ERROR
+
+        def send_file(self, path): #remote_name=None
+            with open(path, 'rb') as f:
+                data = f.read()
+            #msg = b"FILE:" + (remote_name or os.path.basename(path)).encode() + b"\n" + data
+            self.send(data) #self.send(msg)
 
         def is_alive(self, close=True, check_connection=False):
             if not self.__server_is_alive:
@@ -1156,6 +1194,32 @@ init -9999 python:
                 self.__server_is_alive = False
                 self.__pybridge.close_server(self)
 
+                try:
+                    self.__proc.terminate()
+                    self.__proc.wait(timeout=5)
+                except:
+                    self.__proc.kill()
+                    self.__proc.wait()
+
+        def get_status(self):
+            return {
+                "id": self.__id,
+                "version": self.__version,
+                "port": self.PORT,
+                "alive": self.is_alive(False),
+                "busy": self.is_busy(),
+                "path": self.__python_path,
+                "history": list(self.__history)
+            }
+
+        def heartbeat(self, interval=30):
+            def monitor():
+                while self.__active:
+                    if not self.is_alive(check_connection=True):
+                        self.__log_system.log("Server[%d]: heartbeat failed" % self.PORT)
+                    time.sleep(interval)
+            t = threading.Thread(target=monitor, daemon=True)
+            t.start()
 
     pylog = LogSystem()
     pybridge = PyBridge()

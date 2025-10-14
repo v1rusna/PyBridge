@@ -410,6 +410,22 @@ def my_callback(result, error):
 pybridge.python_async(code="2 * 3", callback=my_callback)
 ```
 
+#### `PyBridge.exec_temp_file(src_path, version="3.13.7", seconds=10, cache=False, related_files=None, cwd=None)`
+
+Executes a Python script from a file with support for dependent files and custom working directory.
+
+**Parameters:**
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| src_path | str | - | Path to the main executable file |
+| version | str | "3.13.7" | Python version |
+| seconds | int | 10 | Execution timeout |
+| cache | bool | False | Cache temporary file |
+| related_files | list | None | List of dependent files |
+| cwd | str | None | Execution working directory |
+
+**Returns:** `str` - execution stdout
+
 #### `PyBridge.create_server(version="3.13.7", port=5000)`
 
 Creates a server process.
@@ -468,6 +484,14 @@ Sends code to server for execution.
 | buffer_size | int  | 65536   | Buffer size          |
 
 **Returns:** str - execution result
+
+#### `PyServer.safe_send(code, *a, **kw)`
+
+Safely sends code to the server without causing errors in case of failures.
+
+#### `PyServer.send_file(self, path)`
+
+Reads code from a Python file and sends it to the server for execution.
 
 #### `PyServer.send_async(data, timeout=15, callback=None)`
 
@@ -543,6 +567,7 @@ These elements are for internal logic and may change between versions.
 - `__create_temp_file(file, cache)`: Creates temporary file copy
 - `__popenen(python_path, flags, cwd)`: Starts Python process
 - `__wait_for_server(port, timeout)`: Waits for server startup
+- `__create_temp_file(file, cache, no_rename)`: Creates temporary copies of files and executes them
 
 ### Internal PyServer Methods (internal)
 
@@ -1043,7 +1068,6 @@ for i in range(100):
     result = pybridge.python(code="...", use_pool=False)
 
 # ❌ Inefficient — native threading for CPU-bound tasks
-# (limited by Python’s Global Interpreter Lock)
 ```
 
 ---
@@ -1179,6 +1203,20 @@ init python:
         callback=on_calculation_done,
         progress_callback=show_loading_screen
     )
+```
+
+### 4. Modular Projects
+```python
+dependencies = []
+for root, dirs, files in os.walk("my_project"):
+    for file in files:
+        if file.endswith(".py"):
+            dependencies.append(os.path.join(root, file))
+
+result = pybridge.exec_temp_file(
+    src_path="my_project/main.py",
+    related_files=dependencies
+)
 ```
 
 ## Common Errors and Troubleshooting
