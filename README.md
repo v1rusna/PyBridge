@@ -1,7 +1,7 @@
 
 # PyBridge - Documentation
 
-Original documentation in Russian - [[README_RU]]
+Original documentation in Russian - `README_RU`
 The documentation was translated using AI.
 
 ## Table of Contents
@@ -114,6 +114,62 @@ init python:
 
 ## Code Execution and Result Return Mechanism
 
+### Secure code execution
+
+#### Base64 encoding mechanism
+
+PyBridge uses secure code execution via Base64 encoding:
+
+```python
+# Internal execution process:
+1. User code → UTF-8 bytes
+2. Base64 encoding → secure string
+3. Transfer to Python process
+4. Base64 decoding → source code
+5. Secure execution via exec()
+```
+
+This provides protection against escaping and encoding issues for any characters.
+
+### Advanced initialization parameters
+
+#### Full list of PyBridge parameters:
+
+```python
+pybridge = PyBridge(
+    version="3.13.7",           # Default Python version
+    path=None,                  # Path to interpreter (autodetect)
+    server_default=None,        # Default server file
+    max_age=3600,               # Cache lifetime (seconds)
+    pool_size=2,                # Server pool size
+    safe_mode=False,            # Safe execution mode
+    debug=True,                 # Enable debug output
+    decoder=None                # Custom decoding function)
+)
+```
+
+### Process pool system
+
+#### Automatic server recovery
+
+```python
+# PyBridge automatically monitors the status of servers:
+- Health check with every request
+- Automatic replacement of dead servers
+- Fallback to direct execution in case of pool problems
+- Load balancing between available servers
+```
+
+#### Server selection algorithm
+
+```python
+# Intelligent server selection:
+1. Search for free servers (up to 50 attempts)
+2. Random selection from available servers
+3. Forced selection during long waits
+4. Automatic recovery of problematic servers
+```
+
 ### How print Replacement with _log Works
 
 When code is executed through PyBridge, **all `print` calls are automatically replaced with the `_log` function**. This is important to understand as it affects the returned result.
@@ -224,7 +280,7 @@ result += f"Result: {processed}"
 result = pybridge.python(
     version="3.13.7",
     code="import math; result = math.sqrt(16)",
-    seconds=5
+    timeout=5
 )
 print(result)  # Output: 4.0
 ```
@@ -316,6 +372,26 @@ result = f"{player_name} is traveling on a {weather} day"
 
 ## Detailed API
 
+### ProcessManager Class
+
+**ProcessManager** - a system class for managing processes and ensuring reliable termination on timeouts.
+
+```python
+# Usage example
+manager = ProcessManager()
+proc = manager.create_process(["python", "-c", "print('Hello')"])
+stdout, stderr, code = manager.wait_with_timeout(proc, timeout=5)
+```
+
+#### `ProcessManager.create_process(command, cwd=None)`
+Creates a process with automatic registration for subsequent cleanup.
+
+#### `ProcessManager.wait_with_timeout(proc, timeout, timeout_code=-9)`
+Waits for process completion with timeout. If timeout is exceeded, the process is forcibly terminated.
+
+#### `ProcessManager.cleanup_all()`
+Terminates all active processes registered with the manager.
+
 ### PyBridge Class
 
 Main class for managing Python code execution.
@@ -359,37 +435,65 @@ pybridge.add_python("my_version", "path/to/python", "path/to/server.py")
 **Exceptions:**
 - `PyBridgeFileException`: python cannot find the specified path or it exceeds 60MB.
 
-#### `PyBridge.python(version="3.13.7", code="", seconds=5, args=None, variables=None, cwd=None, input_data=None, use_pool=True)`
+#### `PyBridge.python(version="3.13.7", code="", timeout=5, args=None, variables=None, persist_variables=False, cwd=None, input_data=None, use_pool=True)`
 
 Executes Python code synchronously.
 
 **Parameters:**
 
-| Parameter  | Type       | Default | Description                  |
-| ---------- | ---------- | ------- | ---------------------------- |
-| version    | str        | "3.13.7" | Python version               |
-| code       | str        | ""      | Code to execute              |
-| seconds    | int        | 5       | Execution timeout            |
-| args       | list       | None    | Command line arguments       |
-| variables  | dict       | None    | Variables for context        |
-| cwd        | str        | None    | Working directory            |
-| input_data | str/bytes  | None    | Process input data           |
-| use_pool   | bool       | True    | Use process pool             |
+| Parameter         | Type      | Default  | Description                                   |
+| ----------------- | --------- | -------- | --------------------------------------------- |
+| version           | str       | "3.13.7" | Python version                                |
+| code              | str       | ""       | Code to execute                               |
+| timeout           | int       | 5        | Execution timeout (in seconds)                |
+| args              | list      | None     | Command-line arguments                        |
+| variables         | dict      | None     | Variables to include in the execution context |
+| persist_variables | bool      | False    | Whether to use persistent variables           |
+| cwd               | str       | None     | Working directory                             |
+| input_data        | str/bytes | None     | Input data for the process                    |
+| use_pool          | bool      | True     | Whether to use a process pool                 |
 
-**Returns:** str - execution result (stdout)
+**Returns:**
+`str` — the execution result (`stdout`)
 
 **Exceptions:**
-- `PyBridgeExecException`: on execution error
+
+* `PyBridgeExecException` — raised when an execution error occurs
 
 ```python
 result = pybridge.python(
     version="3.13.7",
     code="x = 10; y = 20; result = x + y",
-    seconds=10
+    timeout=10
 )
 ```
 
-#### `PyBridge.python_async(version="3.13.7", code="", callback=None, seconds=5, args=None, variables=None, cwd=None, input_data=None)`
+### Persistent Variables
+
+If `persist_variables = True`, a `persistent` class is automatically created in the code.
+This class contains **all persistent variables** that have been defined.
+
+Example:
+
+```python
+class persistent:
+    bomb = False
+    flag_olga_goodreal = False
+    flag_olga_true = False
+    ssg_1 = True
+    cleaner_unsupported_renpy = False
+    picture17 = "yes"
+    rfg_sprite_time = "day"
+    CardsDemo = True
+    mt_7dl_bad = 1
+    ...
+    
+# Example of using a persistent variable
+if persistent.bomb:
+    ...
+```
+
+#### `PyBridge.python_async(version="3.13.7", code="", callback=None, timeout=5, args=None, variables=None, persist_variables=False, cwd=None, input_data=None)`
 
 Executes Python code asynchronously.
 
@@ -410,7 +514,7 @@ def my_callback(result, error):
 pybridge.python_async(code="2 * 3", callback=my_callback)
 ```
 
-#### `PyBridge.exec_temp_file(src_path, version="3.13.7", seconds=10, cache=False, related_files=None, cwd=None)`
+#### `PyBridge.exec_temp_file(src_path, version="3.13.7", timeout=10, cache=False, related_files=None, cwd=None)`
 
 Executes a Python script from a file with support for dependent files and custom working directory.
 
@@ -419,7 +523,7 @@ Executes a Python script from a file with support for dependent files and custom
 |------|------|---------|-------------|
 | src_path | str | - | Path to the main executable file |
 | version | str | "3.13.7" | Python version |
-| seconds | int | 10 | Execution timeout |
+| timeout | int | 10 | Execution timeout |
 | cache | bool | False | Cache temporary file |
 | related_files | list | None | List of dependent files |
 | cwd | str | None | Execution working directory |
@@ -439,9 +543,75 @@ Creates a server process.
 
 **Returns:** `PyServer` - server object
 
+#### `PyBridge.get_path(path)`
+**Purpose:** Normalizes a path using Ren'Py's path transformation system
+```python
+# Usage example
+normalized_path = pybridge.get_path("game/scripts/main.py")
+```
+
+#### `PyBridge.init_pool()`
+**Purpose:** Explicitly initializes the server pool for preloading
+```python
+# Recommended for performance optimization
+pybridge.init_pool()
+```
+
+#### `PyBridge.list_versions()`
+**Purpose:** Returns a list of all available Python versions
+```python
+versions = pybridge.list_versions()
+print(f"Available versions: {versions}")
+```
+
+#### `PyBridge.get_info(version)`
+**Purpose:** Returns detailed information about the Python interpreter
+```python
+info = pybridge.get_info("3.13.7")
+print(f"Python version: {info['version']}")
+```
+
+#### `PyBridge.remove_python(version)`
+**Purpose:** Removes a Python version from the system and closes associated servers
+```python
+pybridge.remove_python("old_version")
+```
+
+#### `PyBridge.debug_info()`
+**Purpose:** Outputs comprehensive debug information about the module state
+```python
+pybridge.debug_info()
+```
+
 ### PyServer Class
 
 Manages Python server process.
+
+#### Server Protocol
+
+##### Server Protocol Commands
+
+PyBridge server supports an extended set of commands:
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| **Python code** | Execution of arbitrary code | `print("Hello")` |
+| **EXIT** | Server shutdown | `EXIT` |
+| **IMPORT:module** | Import module into global namespace | `IMPORT:json` |
+| **PING** | Server availability check | `PING` |
+
+##### Server Response Formats
+
+```python
+# Successful execution
+"RESULT:execution result"
+
+# Execution error  
+"ERROR:error message"
+
+# Response to PING
+"PONG"
+```
 
 #### `PyServer.__init__(version, pybridge, port, proc, python_path, random_id)`
 
@@ -508,6 +678,16 @@ Checks whether the server is alive.
 | close            | bool | True    | Automatically close the server if it is not alive      |
 | check_connection | bool | False   | Check the TCP connection instead of the process status |
 
+```python
+# Basic check (process status)
+if server.is_alive():
+    print(“Server is running”)
+
+# TCP connection check  
+if server.is_alive(check_connection=True):
+    print(“Server is responding to requests”)
+```
+
 #### `PyServer.start_logging()`
 
 Starts logging the server’s output in separate threads.
@@ -518,7 +698,27 @@ Starts logging the server’s output in separate threads.
 * Stores references to the threads in `__logging_tread`
 * Logs a message indicating the start of logging
 
+#### `PyServer.get_status()`
+**Purpose:** Returns complete diagnostic information about the server
+
+```python
+status = server.get_status()
+print(f“Server {status[‘id’]} on port {status[‘port’]}”)
+print(f“Version: {status[‘version’]}”)
+print(f“Status: {‘active’ if status[‘alive’] else ‘inactive’}”)
+print(f“Busy: {‘yes’ if status[‘busy’] else ‘no’}”)
+```
+
 ### LogSystem Class
+
+#### Reliable log rotation
+
+```python
+# Automatic size management:
+- Rotation when max_size is exceeded (default 5 MB)
+- Saving backup_count backup copies
+- Backup logging via renpy.log in case of file system errors
+```
 
 #### `LogSystem.__init__(filename=“pybridge.log”, max_size=5242880, backup_count=3)`
 Constructor with log rotation support.
@@ -539,6 +739,17 @@ Methods for different logging levels.
 #### `LogSystem.disable()`, `enable()`
 Enable/disable logging.
 
+#### `LogSystem.to_unicode(message)`
+**Purpose:** Universal conversion to Unicode
+
+```python
+# Supports all data types:
+log.to_unicode("string")           # Unicode strings
+log.to_unicode(b"bytes")           # Byte strings  
+log.to_unicode(123)                # Numbers
+log.to_unicode({"key": "value"})   # Complex objects
+```
+
 ## Auxiliary and Private Elements
 
 The following elements are considered internal and not recommended for direct use unless you understand the consequences:
@@ -552,7 +763,7 @@ These elements are for internal logic and may change between versions.
 ### Internal PyBridge Methods (internal)
 
 - `_get_temp_python(version)`: Creates and returns path to temporary Python copy for isolation
-- `_exec(python_path, seconds, flags, cwd, input_data)`: Internal method for Python process execution
+- `_exec(python_path, timeout, flags, cwd, input_data)`: Internal method for Python process execution
 - `_decoder(stdout, stderr)`: Decodes process output considering system locale
 - `_get_server_from_pool()`: Gets available server from process pool
 - `_has_pip(python_path, timeout)`: Checks pip presence in interpreter
@@ -770,7 +981,7 @@ init python:
                     pybridge.python(
                         version=version,
                         code="result = 'ping'",
-                        seconds=2,
+                        timeout=2,
                         use_pool=True
                     )
                 except Exception as e:
@@ -798,7 +1009,7 @@ init python:
                 result = pybridge.python(
                     version=version,
                     code=code,
-                    seconds=10,
+                    timeout=10,
                     use_pool=True
                 )
                 return result
@@ -857,7 +1068,7 @@ init python:
         # Limit execution time
         result = pybridge.python(
             code=code,
-            seconds=timeout,
+            timeout=timeout,
             safe_mode=True,
             use_pool=True  # Isolation in process pool
         )
@@ -893,7 +1104,7 @@ init python:
 chunk = {chunk}
 result = sum(x * 2 for x in chunk)
 """,
-                    seconds=30,  # Increased timeout
+                    timeout=30,  # Increased timeout
                     use_pool=True
                 )
                 results.append(result)
@@ -1083,7 +1294,40 @@ These results demonstrate that PyBridge not only provides isolation and safety b
 
 ## Nuances and Tips
 
-### 1. Efficient Process Pool Usage
+#### 1. For Maximum Performance:
+
+```python
+# 1. Pre-initialize Python
+pybridge.init_python("my_version")
+
+# 2. Pre-initialize pool
+pybridge.init_pool()
+
+# 3. Regular server status monitoring
+def periodic_health_check():
+    for server in pybridge.get_servers():
+        if not server.is_alive(check_connection=True):
+            print(f"Restarting problematic server {server.get_id()}")
+            # Restart logic
+
+# 4. Use caching for frequently executed scripts
+result = pybridge.exec_temp_file("common_script.py", cache=True)
+```
+
+#### 2. For Debugging and Development:
+
+```python
+# Enable detailed logging
+pylog.debug("Debug information")
+pybridge.debug_info()
+
+# Monitor specific server
+server = pybridge.create_server()
+status = server.get_status()
+print(f"Server status: {status}")
+```
+
+### 3. Efficient Process Pool Usage
 
 ```python
 init python:
@@ -1100,14 +1344,14 @@ init python:
                 code=task['code'],
                 variables=task.get('variables', {}),
                 use_pool=True,  # Key optimization
-                seconds=task.get('timeout', 5)
+                timeout=task.get('timeout', 5)
             )
             results.append(result)
         
         return results
 ```
 
-### 2. Caching Frequently Used Scripts
+### 4. Caching Frequently Used Scripts
 
 ```python
 init python:
@@ -1118,7 +1362,7 @@ init python:
             src_path=script_path,
             version=version,
             cache=True,  # Caching enabled
-            seconds=30
+            timeout=30
         )
     
     # First call - cache created
@@ -1128,7 +1372,7 @@ init python:
     result2 = get_cached_script_result("scripts/heavy_calculation.py")
 ```
 
-### 3. Proper Error Handling
+### 5. Proper Error Handling
 
 ```python
 init python:
@@ -1155,7 +1399,7 @@ init python:
             return pybridge.python(code=code, **kwargs)
 ```
 
-### 4. Asynchronous Operations for UI
+### 6. Asynchronous Operations for UI
 
 ```python
 init python:
@@ -1177,7 +1421,7 @@ init python:
             
             # Main execution
             try:
-                result = pybridge.python(code=code, seconds=30)
+                result = pybridge.python(code=code, timeout=30)
                 renpy.invoke_in_main_thread(callback, result, None)
             except Exception as e:
                 renpy.invoke_in_main_thread(callback, None, e)
@@ -1205,7 +1449,7 @@ init python:
     )
 ```
 
-### 4. Modular Projects
+### 7. Modular Projects
 ```python
 dependencies = []
 for root, dirs, files in os.walk("my_project"):
@@ -1217,6 +1461,29 @@ result = pybridge.exec_temp_file(
     src_path="my_project/main.py",
     related_files=dependencies
 )
+```
+
+#### Example 8: Comprehensive Server Monitoring
+
+```python
+def monitor_servers():
+    """Extended monitoring of all servers' status"""
+    servers = pybridge.get_servers()
+    
+    for server in servers:
+        status = server.get_status()
+        print(f"Server {status['id']}:")
+        print(f"  Port: {status['port']}")
+        print(f"  Version: {status['version']}")
+        print(f"  Status: {'🟢 Active' if status['alive'] else '🔴 Inactive'}")
+        print(f"  Busy: {'🔒 Yes' if status['busy'] else '🔓 No'}")
+        print(f"  History: {len(status['history'])} commands executed")
+        
+        # Detailed connection check
+        if server.is_alive(check_connection=True):
+            print("  Connection: ✅ Stable")
+        else:
+            print("  Connection: ❌ Issues")
 ```
 
 ## Common Errors and Troubleshooting
@@ -1283,7 +1550,7 @@ init python:
     # Increase timeout
     result = pybridge.python(
         code="import time; time.sleep(10); result = 'done'",
-        seconds=15  # Increase timeout
+        timeout=15  # Increase timeout
     )
     
     # Or code optimization
@@ -1409,7 +1676,7 @@ init python:
                     pybridge.python(
                         code=f"import {module}",
                         use_pool=True,
-                        seconds=2
+                        timeout=2
                     )
                 except Exception as e:
                     print(f"Failed to preload {module}: {e}")
@@ -1420,7 +1687,7 @@ init python:
                 return pybridge.python(
                     version=f"{self.mod_name}_python",
                     code=code,
-                    seconds=timeout,
+                    timeout=timeout,
                     variables=variables or {},
                     use_pool=True
                 )
@@ -1802,7 +2069,7 @@ init python:
                 result = pybridge.python(
                     code=test["code"],
                     variables=test.get("variables", {}),
-                    seconds=5
+                    timeout=5
                 )
                 
                 if result == test["expected"]:
@@ -1866,7 +2133,7 @@ result = level_data
 """
             
             try:
-                result_json = pybridge.python(code=code, seconds=10)
+                result_json = pybridge.python(code=code, timeout=10)
                 # Parse JSON result
                 self.procedural_content = json.loads(result_json)
                 return self.procedural_content
@@ -1908,7 +2175,7 @@ result = {{
 """
             
             try:
-                result_json = pybridge.python(code=code, seconds=5)
+                result_json = pybridge.python(code=code, timeout=5)
                 return json.loads(result_json)
             except Exception as e:
                 print(f"Difficulty calculation error: {e}")

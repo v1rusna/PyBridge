@@ -12,7 +12,15 @@ init -9999 python:
     import time
     import hashlib
     import random
-    from collections import deque
+    import string
+
+    def v1monitor(func):
+        def wrapper(*args, **kwargs):
+            start = time.time()
+            result = func(*args, **kwargs)
+            end = time.time()
+            return {"result": result, "time": end-start, "cpu_mem": None, "cpu_used": None}
+        return wrapper
 
     class PyBridgeException(Exception):
         """Базовое исключение для всех ошибок PyBridge"""
@@ -30,6 +38,16 @@ init -9999 python:
 
     class PyBridgeExecException(PyBridgeException):
         """Ошибка исполнения кода на стороне Python"""
+        pass
+
+    class PyBridgeTimeoutException(PyBridgeException):
+        """Исключение, выбрасываемое при превышении времени ожидания выполнения внешнего
+        Python-процесса или серверного запроса.
+
+        Используется, когда процесс был завершён принудительно из‑за таймаута.
+        self.context может содержать дополнительную информацию: timeout (в секундах),
+        proc (объект процесса), port (номер порта для серверов), command/args (запуск).
+        """
         pass
 
     class PyBridgeCacheException(PyBridgeException):
@@ -129,12 +147,17 @@ init -9999 python:
                 except Exception:
                     return message.decode("utf-8", "replace")
 
+            if isinstance(message, dict) or isinstance(message, list) or isinstance(message, tuple):
+                try:
+                    message = json.dumps(message, ensure_ascii=False)
+                except Exception:
+                    pass
+
             # Всё остальное превращаем в строку
             try:
                 return unicode_type(str(message))
             except Exception:
                 return unicode_type(repr(message))
-
 
         def _log_internal(self, message, level):
             """Внутренний метод для записи лога (без блокировки)."""
@@ -256,6 +279,103 @@ init -9999 python:
                     self._closed = False
                     self.open()
 
+    class ProcessManager(object):
+        def __init__(self):
+            self._processes = set()
+            self._lock = threading.Lock()
+
+        def create_process(self, command, cwd=None):
+            """Создает процесс с автоматической регистрацией для cleanup"""
+            startupinfo = None
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                startupinfo=startupinfo,
+                cwd=cwd
+            )
+            
+            with self._lock:
+                self._processes.add(proc)
+            
+            return proc
+
+        def wait_with_timeout(self, proc, timeout, timeout_code=-9):
+            """
+            Ожидает завершения процесса с таймаутом
+            Если процесс завис — завершает его и возвращает сообщение в stderr и returncode
+            """
+            timeout_event = threading.Event()
+            killer_thread = threading.Thread(
+                target=self._watchdog, args=(proc, timeout, timeout_event, timeout_code)
+            )
+            killer_thread.daemon = True
+            killer_thread.start()
+
+            try:
+                stdout, stderr = proc.communicate()
+                timeout_event.set()
+                killer_thread.join(0.1)
+
+                # Если процесс был завершён по таймауту — возвращаем фиктивный stderr и код
+                if getattr(proc, "_timed_out", False):
+                    stderr = "Python process timeout after %d seconds\n" % timeout
+                    return stdout, stderr, timeout_code
+
+                return stdout, stderr, proc.returncode
+
+            finally:
+                with self._lock:
+                    self._processes.discard(proc)
+
+        def _watchdog(self, proc, timeout, event, timeout_code):
+            """Следит за процессом и завершает его при превышении таймаута"""
+            start = time.time()
+            while not event.is_set():
+                if time.time() - start > timeout:
+                    try:
+                        proc.terminate()
+                        for _ in range(10):
+                            if proc.poll() is not None:
+                                break
+                            time.sleep(0.1)
+                        else:
+                            proc.kill()
+                    except Exception:
+                        pass
+                    # Флаг и фиктивный код для основного потока
+                    proc._timed_out = True
+                    proc.returncode = timeout_code
+                    event.set()
+                    return
+                time.sleep(0.05)
+
+
+        def cleanup_all(self):
+            """Завершает все активные процессы"""
+            with self._lock:
+                processes = list(self._processes)
+            
+            for proc in processes:
+                try:
+                    if proc.poll() is None:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
+                except:
+                    pass
+            
+            with self._lock:
+                self._processes.clear()
+
     class PyBridge(object):
         _MODULE_NAME = None # Абсолютный путь директории с файлом PyBridge.py
         create_bridge = False
@@ -303,6 +423,7 @@ init -9999 python:
                 raise PyBridgeInitException("Default server file not found: %s" % server_default)
 
             # --- Системные словари и параметры ---
+            self._process_manager = ProcessManager()
             self.__pythons = {version: path}
             self.__python313_default_path = path
             self.__server_default_path = server_default
@@ -333,7 +454,11 @@ init -9999 python:
             PyBridge.create_bridge = False
             self.cleanup()
 
-        def _path(self, *paths, game_path=True):
+        def _log(self, message, no_lock=False, level="INFO"):
+            if self.debug:
+                pylog.log("PyBridge: " + message, no_lock=no_lock, level=level)
+
+        def _path(self, *paths, **kwargs):
             """
             Формирует путь к файлу или директории внутри проекта.
 
@@ -342,6 +467,7 @@ init -9999 python:
             Пример:
                 self._path("assets", "images", "hero.png")
             """
+            game_path = kwargs.pop('game_path', True)
             base = PyBridge._MODULE_NAME if PyBridge._MODULE_NAME else ("game" if game_path else "")
             parts = [base] + [p for p in paths if p]
             return os.path.normpath(os.path.join(*parts))
@@ -395,7 +521,7 @@ init -9999 python:
 
             with self._lock:
                 if not self.__process_pool:
-                    raise PyBridgeException("No servers in pool")
+                    raise PyBridgeException(err)
                 count = 50
                 while count > 0:
                     servers = [server for server in self.__process_pool if not server.is_busy()]
@@ -480,15 +606,15 @@ init -9999 python:
                         return temp_path
 
                 if version not in self.__pythons:
-                    raise PyBridgeException("Python version '%s' not found" % version)
+                    raise PyBridgeException("Python version '%s' not found" % version, version=version)
 
                 original_path = self.get_path(self.__pythons[version])
 
                 if not os.path.exists(original_path):
-                    raise PyBridgeFileException("Python executable not found: %s" % original_path)
+                    raise PyBridgeFileException("Python executable not found: %s" % original_path, version=version, original_path=original_path)
 
                 if os.path.getsize(original_path) > 60 * 1024 * 1024:
-                    raise PyBridgeException("Python version “%s” weighs more than 60 MB." % version)
+                    raise PyBridgeException("Python version “%s” weighs more than 60 MB." % version, version=version)
 
                 self.__create_temp_dir()
 
@@ -522,7 +648,7 @@ init -9999 python:
             while value in used_set and value < end:
                 value += 1
             if value >= end:
-                raise PyBridgeException("No free slots in range %d-%d" % (start, end))
+                raise PyBridgeException("No free slots in range %d-%d" % (start, end), used_set=set(used_set), start=start, end=end)
             used_set.add(value)
             return value
 
@@ -537,7 +663,7 @@ init -9999 python:
                                 return server
 
                     if version not in self.__server_python:
-                        raise PyBridgeException("Server for Python version '%s' not found" % version)
+                        raise PyBridgeException("Server for Python version '%s' not found" % version, version=version)
 
                     python_path = self._get_temp_python(version)
                     temp_path = self.__create_temp_file(self.__server_python[version])
@@ -546,7 +672,7 @@ init -9999 python:
                     port = self._find_free(self.__busy_ports, start=port, end=60000)
 
                 try:
-                    proc = self.__popenen(python_path, [temp_path, str(port)])
+                    proc = self._process_manager.create_process([python_path, temp_path, str(port)])
                 except OSError:
                     raise PyBridgeServerException("Unable to start the server on port '%s' because it is busy" % port)
 
@@ -619,11 +745,11 @@ init -9999 python:
 
             original_path = self.get_path(path)
             if not os.path.exists(original_path):
-                raise PyBridgeFileException("Python executable not found: %s" % original_path)
+                raise PyBridgeFileException("Python executable not found: %s" % original_path, version=version, path=path, server_file=server_file)
 
             try:
                 if os.path.getsize(original_path) > 60 * 1024 * 1024:
-                    raise PyBridgeException("Python version “%s” weighs more than 60 MB." % version)
+                    raise PyBridgeException("Python version “%s” weighs more than 60 MB." % version, version=version, path=path, server_file=server_file, original_path=original_path)
             except OSError:
                 # если нельзя получить размер (на некоторых FS) — просто пропускаем или логируем
                 self._log("Warning: could not determine size of %s" % original_path, no_lock=True)
@@ -672,7 +798,7 @@ init -9999 python:
             ]
             code = "\n".join(lines)
 
-            out = self.python(version=version, code=code, seconds=None)
+            out = self.python(version=version, code=code)
             with self._lock:
                 self.__cache_info[version] = {"info": json.loads(out), "time": time.time()}
                 return self.__cache_info[version]["info"]
@@ -717,25 +843,26 @@ init -9999 python:
                             self.__temp_pythons = {}
                         except Exception as e:
                             pylog.log("Failed to cleanup temp directory: " + str(e))
+
+                    self._process_manager.cleanup_all()
             except:
                 pass
         
-        def python(self, version="3.13.7", code="", seconds=5, args=None, variables=None, cwd=None, input_data=None, use_pool=True):
+        #@v1monitor
+        def python(self, version="3.13.7", code="", timeout=5, args=None, variables=None, persist_variables = False, cwd=None, input_data=None, use_pool=True):
             """Выполняет код на указанной версии Python, возвращает stdout"""
             if not code:
                 return ""
-            if seconds is None or seconds <= 0:
-                seconds = 9999
+            if timeout is None or timeout <= 0:
+                timeout = 9999
             if variables is None:
                 variables = {}
             if args is None:
                 args = []
-            #if safe_mode is None:
-            #    safe_mode = self.safe_mode
 
             def execute():
                 flags = ["-c", wrapper] + args
-                out, err = self._exec(python_path, seconds, flags, cwd=cwd, input_data=input_data)
+                out, err = self._exec(python_path, timeout, flags, cwd=cwd, input_data=input_data)
                 self._log("--out: %s" % out)
                 return out, err
 
@@ -743,7 +870,7 @@ init -9999 python:
                 python_path = self._get_temp_python(version)
 
                 # Создаем обертку, которая декодирует и выполняет код
-                wrapper = self.__wrapper(code, variables, server_mode=use_pool) #safe_mode
+                wrapper = self.__wrapper(code, variables, server_mode=use_pool, persist_variables=persist_variables)
 
                 if self.debug:
                     with codecs.open("debug.py", "w", encoding="utf-8") as f:
@@ -753,14 +880,16 @@ init -9999 python:
                     server = self._get_server_from_pool()
                     try:
                         if not server.is_alive(check_connection=True):
-                            #self._log("The server on port %s from the pool failed the connection check; the standard method is used." % server.PORT)
-                            pylog.log("The server on port %s from the pool failed the connection check; the standard method is used." % server.PORT)
-                            self.__wrapper(code, variables) #safe_mode
+                            self._log("The server on port %s from the pool failed the connection check; the standard method is used." % server.PORT)
+                            #pylog.log("The server on port %s from the pool failed the connection check; the standard method is used." % server.PORT)
+                            self.__wrapper(code, variables, persist_variables=persist_variables)
                             out, err = execute()
                             return out
 
-                        result = server.send(wrapper)
+                        result = server.send(wrapper, timeout)
                         return result[len("RESULT:"):] if result.startswith("RESULT:") else result
+                    except PyBridgeTimeoutException:
+                        raise
                     except Exception as e:
                         raise PyBridgeExecException("Pool execution error: %s" % e)
                 else:
@@ -772,53 +901,25 @@ init -9999 python:
                 pylog.log("PyBridge: python() exception: %s" % repr(e))
                 raise
 
-        def _exec(self, python_path, seconds, flags=None, cwd=None, input_data=None):
+        def _exec(self, python_path, timeout, flags=None, cwd=None, input_data=None):
             if flags is None:
                 flags = []
             if not isinstance(input_data, (bytes, type(None))):
                 input_data = input_data.encode('utf-8')
 
-            proc = self.__popenen(python_path, flags, cwd)
+            proc = self._process_manager.create_process([python_path]+flags, cwd)
 
-            start = time.time()
-            while proc.poll() is None:
-                if time.time() - start > seconds:
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
-                    raise PyBridgeExecException("Python process timeout after %d seconds" % seconds)
-                time.sleep(0.05)
-
-            stdout, stderr = proc.communicate(input=input_data) # timeout - нет в python 2.7 и поэтому он воссоздан вручную
+            stdout, stderr, code = self._process_manager.wait_with_timeout(proc, timeout)
 
             out, err = self._decoder(stdout, stderr)
 
-            if proc.returncode != 0:
-                raise PyBridgeExecException("Python execution failed (rc=%s): %s" % (proc.returncode, err))
+            if code == -9:
+                raise PyBridgeTimeoutException(err, timeout=timeout, proc=proc)
+
+            if code != 0:
+                raise PyBridgeExecException("Python execution failed (rc=%s): %s" % (code, err))
                     
             return out, err
-
-        def __popenen(self, python_path, flags, cwd=None):
-            if cwd is None:
-                working_dir = os.path.dirname(python_path)
-            else:
-                working_dir = cwd
-
-            startupinfo = None
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            proc = subprocess.Popen(
-                [python_path] + flags,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                startupinfo=startupinfo,
-                cwd=working_dir
-            )
-
-            return proc
 
         def _decoder(self, stdout=None, stderr=None):
             out = err = ""
@@ -836,7 +937,7 @@ init -9999 python:
 
             return out, err
 
-        def __wrapper(self, code, variables, server_mode=False):
+        def __wrapper(self, code, variables, persist_variables, server_mode=False):
             import json, base64
 
             try:
@@ -847,6 +948,15 @@ init -9999 python:
             code = code.replace("print(", "_log(")
 
             lines = []
+
+            if persist_variables:
+                lines.append("class persistent:")
+                for k, v in self.__get_all_persistent_vars().items():
+                    try:
+                        lines.append("    %s = %r" % (k, v))
+                    except:
+                        pass
+
             lines.append("result = ''")
             if server_mode:
                 lines.append("import json")
@@ -902,11 +1012,18 @@ init -9999 python:
             wrapper = "\n".join(lines)
             return wrapper
 
+        def __get_all_persistent_vars(self):
+            return {
+                k: v
+                for k, v in vars(persistent).items()
+                if not k.startswith("_")
+            }
+
         def init_python(self, version="3.13.7"):
             """Инициализирует и возвращает путь к Python интерпретатору указанной версии"""
             return self._get_temp_python(version)
 
-        def python_async(self, version="3.13.7", code="", callback=None, seconds=5, args=None, variables=None, cwd=None, input_data=None, use_pool=False):
+        def python_async(self, version="3.13.7", code="", callback=None, timeout=5, args=None, variables=None, persist_variables = False, cwd=None, input_data=None, use_pool=False):
             if not code:
                 if callback:
                     # вызываем callback в основном потоке
@@ -915,7 +1032,7 @@ init -9999 python:
 
             def target():
                 try:
-                    result = self.python(version, code, seconds, args, variables, cwd, input_data, use_pool)
+                    result = self.python(version, code, timeout, args, variables, cwd, input_data, use_pool)
                     if callback:
                         renpy.invoke_in_main_thread(callback, result)
                 except Exception as e:
@@ -947,7 +1064,7 @@ init -9999 python:
         def __create_temp_file(self, file, cache=False, no_rename=False):
             file = self.get_path(file)
             if not os.path.exists(file):
-                raise PyBridgeException("Source file does not exist: %s" % file)
+                raise PyBridgeException("Source file does not exist: %s" % file, file=file, cache=cache, no_rename=no_rename)
 
             self.__create_temp_dir()
 
@@ -968,7 +1085,7 @@ init -9999 python:
 
             return temp_path
 
-        def exec_temp_file(self, src_path, version="3.13.7", seconds=10, cache=False, related_files=None, cwd=None):
+        def exec_temp_file(self, src_path, version="3.13.7", timeout=10, cache=False, related_files=None, cwd=None):
             """
             Копирует указанный файл во временную директорию PyBridge, выполняет его указанной версией Python.
             Если cache=True, временный файл сохраняется для повторного использования.
@@ -989,7 +1106,7 @@ init -9999 python:
 
             # Выполнение файла
             try:
-                out, err = self._exec(python_path, seconds, flags=[temp_path], cwd=cwd)
+                out, err = self._exec(python_path, timeout, flags=[temp_path], cwd=cwd)
             except Exception as e:
                 raise PyBridgeExecException("Failed to execute temporary file: %s" % e)
 
@@ -1007,10 +1124,6 @@ init -9999 python:
                     pass
 
             return out
-
-        def _log(self, message, no_lock=False):
-            if self.debug:
-                pylog.log("PyBridge: " + message, no_lock=no_lock)
 
     class PyServer(object):
         """
@@ -1054,6 +1167,7 @@ init -9999 python:
         def version(self):
             return self.__version
 
+        #@v1monitor
         def send(self, code, timeout=5, buffer_size=65536, expect_result=True):
             import socket
             if not self.__active or not self.is_alive():
@@ -1067,14 +1181,20 @@ init -9999 python:
                 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client.settimeout(timeout)
                 client.connect((self.HOST, self.PORT))
+
                 if not isinstance(code, bytes):
                     code = code.encode('utf-8')
+
                 client.sendall(code)
+
                 if not expect_result:
                     return
+                
                 data = client.recv(buffer_size).decode('utf-8', errors='replace')
                 self.__history.append((time.time(), code, data))
                 return data
+            except socket.timeout:
+                raise PyBridgeTimeoutException("Python process timeout after %d seconds\n" % timeout, timeout=timeout, server=self)
             except Exception as e:
                 self.__history.append((time.time(), code, "ERROR"))
                 self.__log_system.log("Send error on port %d: %s" % (self.PORT, e))
@@ -1092,7 +1212,7 @@ init -9999 python:
                 return self.send(code, *a, **kw)
             except Exception as e:
                 self.__log_system.log("safe_send failed: %s" % e)
-                return "ERROR
+                return "ERROR"
 
         def send_file(self, path): #remote_name=None
             with open(path, 'rb') as f:
@@ -1129,7 +1249,7 @@ init -9999 python:
                 s.sendall(b"PING")
                 result = s.recv(1024)
                 return True
-            except (ConnectionRefusedError, socket.timeout):
+            except:
                 return False
             finally:
                 try:
